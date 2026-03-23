@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🐔 母鸡农场</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #2C1810;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+    user-select: none;
+}
+#game-canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    cursor: pointer;
+    border: 3px solid #8B6914;
+    border-radius: 4px;
+}
+</style>
+</head>
+<body>
+<canvas id="game-canvas" width="800" height="600"></canvas>
+<script>
+// ============================================================
+//  🐔 母鸡农场 — Chicken Farm Idle Game
+// ============================================================
+
+const canvas = document.getElementById('game-canvas');
+const ctx = canvas.getContext('2d');
+const W = 800, H = 600;
+
+const GROUND_Y = 200;
+const FIELD_TOP = 240;
+const FIELD_BOTTOM = 530;
+const FIELD_LEFT = 40;
+const FIELD_RIGHT = 760;
+const DAY_LENGTH = 60;
+const NIGHT_LENGTH = 60;
+const GOLDEN_EGG_CHANCE = 0.05;
+const GOLDEN_EGG_MULTIPLIER = 10;
+const MERGE_COUNT = 3;
+const MAX_LEVEL = 5;
+const SAVE_INTERVAL = 15000;
+
+const LEVEL_DATA = [
+    null,
+    { name:'小白鸡', body:'#F5F0DC', comb:'#CC3333', eye:'#1A1A1A', beak:'#E8A317', feet:'#D4891C', tail:'#DDD5BA', wing:'#E8E0C8', scale:3, eggColor:'#FFF8E7', eggValue:1, layTime:6000, cost:10 },
+    { name:'棕母鸡', body:'#C4884D', comb:'#CC3333', eye:'#1A1A1A', beak:'#E8A317', feet:'#D4891C', tail:'#A06830', wing:'#B07840', scale:3.8, eggColor:'#D4A76A', eggValue:3, layTime:9000, cost:30 },
+    { name:'黑母鸡', body:'#4A4A4A', comb:'#CC3333', eye:'#E8E8E8', beak:'#E8A317', feet:'#D4891C', tail:'#333333', wing:'#555555', scale:4.6, eggColor:'#555555', eggValue:8, layTime:13000, cost:80 },
+    { name:'紫母鸡', body:'#7B5EA7', comb:'#CC3333', eye:'#1A1A1A', beak:'#E8A317', feet:'#D4891C', tail:'#5D4080', wing:'#8B6EAA', scale:5.4, eggColor:'#9B7ECC', eggValue:20, layTime:18000, cost:200 },
+    { name:'金凤凰', body:'#FFD700', comb:'#FF4444', eye:'#1A1A1A', beak:'#FFA500', feet:'#FF8C00', tail:'#DAA520', wing:'#FFED4A', scale:6.2, eggColor:'#FFD700', eggValue:50, layTime:25000, cost:500 },
+];
+
+const CHICKEN_PATTERN = [
+    '..RR........',
+    '.RRR........',
+    '.BBBB.......',
+    'BBBBBBB.....',
+    'BBBBBBBB....',
+    'BEBBBBBBBB..',
+    'YBBBBBBBBBB.',
+    '.BBBBBBBBBTT',
+    '..BBBBBBBTT.',
+    '..BBWWBBBT..',
+    '...BWWBB....',
+    '....FF.FF...',
+];
+
+const EGG_PATTERN = [
+    '..CC..',
+    '.CCCC.',
+    'CCCCCC',
+    'CCCCCC',
+    'CCCCCC',
+    '.CCCC.',
+    '..CC..',
+];
+
+// ======================== SPRITE CACHE ========================
+
+const spriteCache = {};
+
+function createSprite(pattern, colorMap, scale) {
+    const key = JSON.stringify({ pattern, colorMap, scale });
+    if (spriteCache[key]) return spriteCache[key];
+    const rows = pattern.length;
+    const cols = pattern[0].length;
+    const c = document.createElement('canvas');
+    c.width = cols * scale;
+    c.height = rows * scale;
+    const sctx = c.getContext('2d');
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const ch = pattern[y][x];
+            if (ch === '.' || !colorMap[ch]) continue;
+            sctx.fillStyle = colorMap[ch];
+            sctx.fillRect(x * scale, y * scale, scale, scale);
+        }
+    }
+    spriteCache[key] = c;
+    return c;
+}
+
+function getChickenSprite(level, flip) {
+    const d = LEVEL_DATA[level];
+    const colorMap = { B:d.body, R:d.comb, E:d.eye, Y:d.beak, F:d.feet, T:d.tail, W:d.wing };
+    const pattern = flip ? CHICKEN_PATTERN.map(r => r.split('').reverse().join('')) : CHICKEN_PATTERN;
+    return createSprite(pattern, colorMap, d.scale);
+}
+
+function getEggSprite(level, isGolden) {
+    const d = LEVEL_DATA[level];
+    const color = isGolden ? '#FFD700' : d.eggColor;
+    const highlight = isGolden ? '#FFED4A' : lightenColor(d.eggColor, 30);
+    const pattern = EGG_PATTERN.map((row, i) => i < 2 ? row.replace(/C/g, 'H') : row);
+    const scale = Math.max(2, d.scale * 0.6);
+    return createSprite(pattern, { C:color, H:highlight }, scale);
+}
+
+function lightenColor(hex, amount) {
+    const num = parseInt(hex.replace('#',''), 16);
+    const r = Math.min(255, (num >> 16) + amount);
+    const g = Math.min(255, ((num >> 8) & 0xFF) + amount);
+    const b = Math.min(255, (num & 0xFF) + amount);
+    return `rgb(${r},${g},${b})`;
+}
+
+// ======================== GAME STATE ========================
+
+const game = {
+    gold: 15,
+    chickens: [],
+    eggs: [],
+    coopCapacity: 5,
+    dayTimer: 0,
+    isDay: true,
+    dayCount: 1,
+    shopOpen: false,
+    mergeMode: false,
+    selectedForMerge: [],
+    particles: [],
+    floatingTexts: [],
+    lastTime: 0,
+    saveTimer: 0,
+};
+
+let chickenIdCounter = 0;
+
+function createChicken(level, x, y) {
+    return {
+        id: chickenIdCounter++,
+        level: level,
+        x: x || FIELD_LEFT + Math.random() * (FIELD_RIGHT - FIELD_LEFT - 60),
+        y: y || FIELD_TOP + Math.random() * (FIELD_BOTTOM - FIELD_TOP - 40),
+        vx: 0, vy: 0,
+        facingRight: Math.random() > 0.5,
+        mood: 80,
+        eggTimer: LEVEL_DATA[level].layTime * (0.5 + Math.random() * 0.5),
+        state: 'idle',
+        stateTimer: 0,
+        jumpY: 0,
+        walkTarget: null,
+        selected: false,
+    };
+}
+
+// ======================== CHICKEN BEHAVIOR ========================
+
+function updateChicken(chicken, dt) {
+    const d = LEVEL_DATA[chicken.level];
+
+    if (!game.isDay) {
+        chicken.state = 'sleeping';
+        chicken.eggTimer = d.layTime * 0.5;
+        return;
+    }
+    if (chicken.state === 'sleeping' && game.isDay) {
+        chicken.state = 'idle';
+    }
+
+    // Mood
+    if (game.chickens.length > game.coopCapacity) {
+        chicken.mood = Math.max(10, chicken.mood - dt * 5);
+    } else {
+        chicken.mood = Math.min(100, chicken.mood + dt * 3);
+    }
+
+    // Egg timer
+    const moodMult = chicken.mood > 50 ? 1 : 2;
+    chicken.eggTimer -= dt * 1000 / moodMult;
+    if (chicken.eggTimer <= 0 && game.isDay) {
+        layEgg(chicken);
+        chicken.eggTimer = d.layTime * (0.8 + Math.random() * 0.4);
+    }
+
+    // State machine
+    chicken.stateTimer -= dt * 1000;
+
+    if (chicken.state === 'jumping') {
+        chicken.jumpY += chicken.vy * dt;
+        chicken.vy += 800 * dt;
+        chicken.x += chicken.vx * dt;
+        chicken.x = Math.max(FIELD_LEFT, Math.min(FIELD_RIGHT - 40, chicken.x));
+        if (chicken.jumpY >= 0) {
+            chicken.jumpY = 0;
+            chicken.vy = 0;
+            chicken.vx = 0;
+            chicken.state = 'idle';
+            chicken.stateTimer = 1000 + Math.random() * 2000;
+        }
+    } else if (chicken.state === 'walking') {
+        if (chicken.walkTarget) {
+            const dx = chicken.walkTarget.x - chicken.x;
+            const dy = chicken.walkTarget.y - chicken.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < 5 || chicken.stateTimer <= 0) {
+                chicken.state = 'idle';
+                chicken.stateTimer = 2000 + Math.random() * 3000;
+                chicken.walkTarget = null;
+            } else {
+                chicken.x += (dx/dist) * 30 * dt;
+                chicken.y += (dy/dist) * 30 * dt;
+                chicken.facingRight = dx > 0;
+            }
+        } else {
+            chicken.state = 'idle';
+        }
+    } else if (chicken.state === 'idle') {
+        if (chicken.stateTimer <= 0) {
+            if (Math.random() < 0.6) {
+                chicken.state = 'walking';
+                chicken.stateTimer = 2000 + Math.random() * 3000;
+                chicken.walkTarget = {
+                    x: FIELD_LEFT + Math.random() * (FIELD_RIGHT - FIELD_LEFT - 60),
+                    y: FIELD_TOP + Math.random() * (FIELD_BOTTOM - FIELD_TOP - 40),
+                };
+                chicken.facingRight = chicken.walkTarget.x > chicken.x;
+            } else {
+                chicken.stateTimer = 1000 + Math.random() * 2000;
+            }
+        }
+    }
+}
+
+function pokeChicken(chicken, clickX, clickY) {
+    if (chicken.state === 'sleeping') return;
+    const dx = chicken.x - clickX;
+    const dy = chicken.y - clickY;
+    const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+    chicken.state = 'jumping';
+    chicken.vx = (dx/dist) * 200;
+    chicken.vy = -300;
+    chicken.jumpY = 0;
+    chicken.facingRight = dx > 0;
+    chicken.stateTimer = 2000;
+    addFloatingText(chicken.x, chicken.y - 20, '咕！', '#FFF', 800);
+}
+
+function layEgg(chicken) {
+    const d = LEVEL_DATA[chicken.level];
+    const isGolden = Math.random() < GOLDEN_EGG_CHANCE;
+    game.eggs.push({
+        x: chicken.x + (chicken.facingRight ? -10 : 10) + Math.random() * 10,
+        y: chicken.y + 15,
+        level: chicken.level,
+        isGolden: isGolden,
+        value: isGolden ? d.eggValue * GOLDEN_EGG_MULTIPLIER : d.eggValue,
+        bobOffset: Math.random() * Math.PI * 2,
+    });
+    if (isGolden) {
+        addFloatingText(chicken.x, chicken.y - 10, '✨金蛋！', '#FFD700', 1500);
+    }
+}
+
+// ======================== PARTICLES ========================
+
+function addFloatingText(x, y, text, color, duration) {
+    game.floatingTexts.push({ x, y, text, color, duration, elapsed:0 });
+}
+
+function addParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+        game.particles.push({
+            x, y,
+            vx: (Math.random()-0.5)*200,
+            vy: -Math.random()*150 - 50,
+            life: 0.5 + Math.random()*0.5,
+            elapsed: 0,
+            color: color,
+            size: 2 + Math.random()*3,
+        });
+    }
+}
+
+function updateParticles(dt) {
+    game.particles = game.particles.filter(p => {
+        p.elapsed += dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += 300 * dt;
+        return p.elapsed < p.life;
+    });
+    game.floatingTexts = game.floatingTexts.filter(ft => {
+        ft.elapsed += dt;
+        ft.y -= 30 * dt;
+        return ft.elapsed < ft.duration / 1000;
+    });
+}
+
+
+// ======================== RENDERING ========================
+
+function lerp(a, b, t) { return a + (b-a)*t; }
+
+function lerpColor(c1, c2, t) {
+    const r1=parseInt(c1.slice(1,3),16), g1=parseInt(c1.slice(3,5),16), b1=parseInt(c1.slice(5,7),16);
+    const r2=parseInt(c2.slice(1,3),16), g2=parseInt(c2.slice(3,5),16), b2=parseInt(c2.slice(5,7),16);
+    const r=Math.round(lerp(r1,r2,t)), g=Math.round(lerp(g1,g2,t)), b=Math.round(lerp(b1,b2,t));
+    return `rgb(${r},${g},${b})`;
+}
+
+function drawBackground() {
+    const dayProgress = game.dayTimer / (game.isDay ? DAY_LENGTH : NIGHT_LENGTH);
+    let skyTop, skyBottom;
+
+    if (game.isDay) {
+        if (dayProgress < 0.2) {
+            skyTop = lerpColor('#FF9966','#87CEEB', dayProgress/0.2);
+            skyBottom = lerpColor('#FFE4B5','#B0E0E6', dayProgress/0.2);
+        } else if (dayProgress > 0.8) {
+            skyTop = lerpColor('#87CEEB','#FF7F50', (dayProgress-0.8)/0.2);
+            skyBottom = lerpColor('#B0E0E6','#FFD700', (dayProgress-0.8)/0.2);
+        } else {
+            skyTop = '#87CEEB';
+            skyBottom = '#B0E0E6';
+        }
+    } else {
+        skyTop = '#1a1a3e';
+        skyBottom = '#2d2d5e';
+    }
+
+    const skyGrad = ctx.createLinearGradient(0,0,0,GROUND_Y);
+    skyGrad.addColorStop(0, skyTop);
+    skyGrad.addColorStop(1, skyBottom);
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, GROUND_Y);
+
+    // Stars at night
+    if (!game.isDay) {
+        ctx.fillStyle = 'rgba(255,255,255,0.8)';
+        for (let i = 0; i < 30; i++) {
+            const sx = (42*(i+1)*7) % W;
+            const sy = (42*(i+1)*13) % (GROUND_Y-20);
+            ctx.fillRect(Math.floor(sx), Math.floor(sy), ((i*3)%3)+1, ((i*3)%3)+1);
+        }
+    }
+
+    // Sun or moon
+    if (game.isDay) {
+        const sunX = lerp(100, 700, dayProgress);
+        const sunY = 60 - Math.sin(dayProgress*Math.PI)*30;
+        ctx.fillStyle = '#FFD700';
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, 20, 0, Math.PI*2);
+        ctx.fill();
+    } else {
+        ctx.fillStyle = '#F0E68C';
+        ctx.beginPath(); ctx.arc(400,50,18,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle = skyTop;
+        ctx.beginPath(); ctx.arc(410,45,16,0,Math.PI*2); ctx.fill();
+    }
+
+    // Ground
+    ctx.fillStyle = game.isDay ? '#7EC850' : '#3D6428';
+    ctx.fillRect(0, GROUND_Y, W, H-GROUND_Y);
+    const groundDark = game.isDay ? '#6DB840' : '#2D5018';
+    ctx.fillStyle = groundDark;
+    for (let i = 0; i < 60; i++) {
+        ctx.fillRect(((i*47+13)%(W-20))+10, GROUND_Y+10+((i*31+7)%(H-GROUND_Y-20)), 3, 3);
+    }
+
+    // Fence
+    const fenceColor = game.isDay ? '#8B6914' : '#5A4510';
+    const fenceLight = game.isDay ? '#A0801A' : '#6B5515';
+    ctx.fillStyle = fenceColor;
+    ctx.fillRect(FIELD_LEFT-10, FIELD_TOP-30, FIELD_RIGHT-FIELD_LEFT+20, 4);
+    ctx.fillRect(FIELD_LEFT-10, FIELD_TOP-15, FIELD_RIGHT-FIELD_LEFT+20, 4);
+    for (let fx = FIELD_LEFT-10; fx <= FIELD_RIGHT+10; fx += 80) {
+        ctx.fillStyle = fenceLight;
+        ctx.fillRect(fx, FIELD_TOP-40, 6, 30);
+        ctx.fillStyle = fenceColor;
+        ctx.fillRect(fx+1, FIELD_TOP-40, 4, 30);
+    }
+}
+
+function drawChickenObj(chicken) {
+    const sprite = chicken.facingRight ? getChickenSprite(chicken.level,true) : getChickenSprite(chicken.level,false);
+    const drawX = chicken.x;
+    const drawY = chicken.y + chicken.jumpY;
+
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.beginPath();
+    ctx.ellipse(drawX+sprite.width/2, chicken.y+sprite.height-2, sprite.width/3, 4, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.drawImage(sprite, drawX, drawY);
+
+    if (chicken.selected) {
+        ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 2;
+        ctx.strokeRect(drawX-2, drawY-2, sprite.width+4, sprite.height+4);
+    }
+
+    if (game.isDay && chicken.mood < 50) {
+        ctx.font = '14px serif';
+        ctx.fillStyle = '#FF6B6B';
+        ctx.fillText('😢', drawX+sprite.width/2-7, drawY-8);
+    }
+
+    if (chicken.state === 'sleeping') {
+        const bob = Math.sin(Date.now()/500)*3;
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = '12px monospace';
+        ctx.fillText('z', drawX+sprite.width/2+5, drawY-5+bob);
+        ctx.font = '10px monospace';
+        ctx.fillText('z', drawX+sprite.width/2+12, drawY-12+bob);
+        ctx.font = '8px monospace';
+        ctx.fillText('z', drawX+sprite.width/2+17, drawY-18+bob);
+    }
+}
+
+function drawEggObj(egg) {
+    const sprite = getEggSprite(egg.level, egg.isGolden);
+    const bob = Math.sin(egg.bobOffset + Date.now()/400)*2;
+    if (egg.isGolden) {
+        const shimmer = Math.sin(Date.now()/200)*0.3+0.3;
+        ctx.fillStyle = `rgba(255,215,0,${shimmer})`;
+        ctx.beginPath();
+        ctx.arc(egg.x+sprite.width/2, egg.y+sprite.height/2+bob, sprite.width, 0, Math.PI*2);
+        ctx.fill();
+    }
+    ctx.drawImage(sprite, egg.x, egg.y+bob);
+}
+
+function drawUI() {
+    ctx.fillStyle = 'rgba(44,24,16,0.85)';
+    ctx.fillRect(0, 0, W, 45);
+    ctx.fillStyle = '#8B6914';
+    ctx.fillRect(0, 45, W, 2);
+
+    ctx.font = 'bold 18px monospace';
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'left';
+    ctx.fillText('🪙 ' + game.gold, 20, 30);
+
+    ctx.font = '14px monospace';
+    ctx.fillStyle = game.chickens.length > game.coopCapacity ? '#FF6B6B' : '#90EE90';
+    ctx.fillText('🐔 '+game.chickens.length+'/'+game.coopCapacity, 160, 30);
+
+    ctx.fillStyle = '#F5E6C8';
+    const timeIcon = game.isDay ? '☀️' : '🌙';
+    ctx.fillText(timeIcon+' 第'+game.dayCount+'天 '+(game.isDay?'白天':'夜晚'), 300, 30);
+    ctx.fillText('🥚 '+game.eggs.length, 470, 30);
+
+    drawButton(580, 8, 80, 30, '商店', game.shopOpen ? '#DAA520' : '#8B6914');
+    drawButton(670, 8, 80, 30, '合成', game.mergeMode ? '#DAA520' : '#8B6914');
+}
+
+function drawButton(x, y, w, h, text, bg) {
+    ctx.fillStyle = bg;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, w, h);
+    ctx.font = 'bold 14px monospace';
+    ctx.fillStyle = '#F5E6C8';
+    ctx.textAlign = 'center';
+    ctx.fillText(text, x+w/2, y+h/2+5);
+    ctx.textAlign = 'left';
+}
+
+function drawShop() {
+    if (!game.shopOpen) return;
+    const sx=W-220, sy=50, sw=220, sh=H-50;
+    ctx.fillStyle = 'rgba(44,24,16,0.95)';
+    ctx.fillRect(sx, sy, sw, sh);
+    ctx.strokeStyle = '#8B6914'; ctx.lineWidth = 2;
+    ctx.strokeRect(sx, sy, sw, sh);
+
+    ctx.font = 'bold 16px monospace';
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'center';
+    ctx.fillText('🏪 商店', sx+sw/2, sy+30);
+    ctx.textAlign = 'left';
+
+    let iy = sy + 50;
+    for (let lv = 1; lv <= MAX_LEVEL; lv++) {
+        const d = LEVEL_DATA[lv];
+        const canBuy = game.gold >= d.cost;
+        ctx.fillStyle = canBuy ? 'rgba(139,105,20,0.3)' : 'rgba(80,80,80,0.3)';
+        ctx.fillRect(sx+10, iy, sw-20, 60);
+        ctx.strokeStyle = canBuy ? '#8B6914' : '#555'; ctx.lineWidth = 1;
+        ctx.strokeRect(sx+10, iy, sw-20, 60);
+
+        const ms = getChickenSprite(lv, false);
+        ctx.drawImage(ms, sx+15, iy+8, ms.width*0.6, ms.height*0.6);
+
+        ctx.font = '13px monospace';
+        ctx.fillStyle = canBuy ? '#F5E6C8' : '#888';
+        ctx.fillText(d.name, sx+70, iy+22);
+        ctx.font = '11px monospace';
+        ctx.fillStyle = canBuy ? '#FFD700' : '#666';
+        ctx.fillText('🪙 '+d.cost, sx+70, iy+38);
+        ctx.fillStyle = '#999';
+        ctx.fillText('产蛋值:'+d.eggValue, sx+70, iy+52);
+        iy += 68;
+    }
+
+    const coopCost = game.coopCapacity * 30;
+    const canUp = game.gold >= coopCost;
+    iy += 10;
+    ctx.fillStyle = canUp ? 'rgba(76,175,80,0.3)' : 'rgba(80,80,80,0.3)';
+    ctx.fillRect(sx+10, iy, sw-20, 50);
+    ctx.strokeStyle = canUp ? '#4CAF50' : '#555';
+    ctx.strokeRect(sx+10, iy, sw-20, 50);
+    ctx.font = '13px monospace';
+    ctx.fillStyle = canUp ? '#90EE90' : '#888';
+    ctx.fillText('🏠 扩建鸡舍', sx+20, iy+22);
+    ctx.font = '11px monospace';
+    ctx.fillStyle = canUp ? '#FFD700' : '#666';
+    ctx.fillText('🪙 '+coopCost+' → 容量+2', sx+20, iy+40);
+}
+
+function drawMergeInfo() {
+    if (!game.mergeMode) return;
+    ctx.fillStyle = 'rgba(44,24,16,0.8)';
+    ctx.fillRect(0, H-50, W, 50);
+    ctx.font = '14px monospace';
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'center';
+    ctx.fillText('合成模式：选择 '+MERGE_COUNT+' 只同级母鸡 ('+game.selectedForMerge.length+'/'+MERGE_COUNT+')', W/2, H-25);
+    if (game.selectedForMerge.length > 0) {
+        const lv = game.chickens.find(c => c.id === game.selectedForMerge[0])?.level;
+        ctx.fillStyle = '#BBA580';
+        ctx.fillText('已选择 Lv.'+lv+' 母鸡', W/2, H-8);
+    }
+    ctx.textAlign = 'left';
+}
+
+function drawParticles() {
+    game.particles.forEach(p => {
+        ctx.globalAlpha = 1 - p.elapsed/p.life;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x, p.y, p.size, p.size);
+    });
+    ctx.globalAlpha = 1;
+    game.floatingTexts.forEach(ft => {
+        ctx.globalAlpha = 1 - ft.elapsed/(ft.duration/1000);
+        ctx.font = 'bold 14px monospace';
+        ctx.fillStyle = ft.color;
+        ctx.textAlign = 'center';
+        ctx.fillText(ft.text, ft.x, ft.y);
+        ctx.textAlign = 'left';
+    });
+    ctx.globalAlpha = 1;
+}
+
+// ======================== INPUT ========================
+
+canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX-rect.left)*(W/rect.width);
+    const my = (e.clientY-rect.top)*(H/rect.height);
+
+    if (my < 45) {
+        if (mx>=580 && mx<=660) { game.shopOpen=!game.shopOpen; game.mergeMode=false; game.selectedForMerge=[]; return; }
+        if (mx>=670 && mx<=750) { game.mergeMode=!game.mergeMode; game.shopOpen=false; game.selectedForMerge=[]; game.chickens.forEach(c=>c.selected=false); return; }
+        return;
+    }
+
+    if (game.shopOpen && mx >= W-220) { handleShopClick(mx, my); return; }
+
+    for (let i = game.eggs.length-1; i >= 0; i--) {
+        const egg = game.eggs[i];
+        const sp = getEggSprite(egg.level, egg.isGolden);
+        if (mx>=egg.x && mx<=egg.x+sp.width && my>=egg.y-5 && my<=egg.y+sp.height+5) {
+            game.gold += egg.value;
+            addFloatingText(egg.x, egg.y-10, '+'+egg.value, egg.isGolden?'#FFD700':'#FFF', 1000);
+            addParticles(egg.x, egg.y, egg.isGolden?'#FFD700':LEVEL_DATA[egg.level].eggColor, 5);
+            game.eggs.splice(i, 1);
+            return;
+        }
+    }
+
+    for (let i = game.chickens.length-1; i >= 0; i--) {
+        const c = game.chickens[i];
+        const sp = getChickenSprite(c.level, false);
+        if (mx>=c.x && mx<=c.x+sp.width && my>=c.y+c.jumpY && my<=c.y+c.jumpY+sp.height) {
+            if (game.mergeMode) { handleMergeSelect(c); } else { pokeChicken(c, mx, my); }
+            return;
+        }
+    }
+});
+
+// ======================== SHOP & MERGE ========================
+
+function handleShopClick(mx, my) {
+    const sx=W-220, sy=50;
+    for (let lv=1; lv<=MAX_LEVEL; lv++) {
+        const iy = sy+50+(lv-1)*68;
+        if (my>=iy && my<=iy+60 && mx>=sx+10 && mx<=sx+200) { buyChicken(lv); return; }
+    }
+    const coopY = sy+50+MAX_LEVEL*68+10;
+    if (my>=coopY && my<=coopY+50) { upgradeCoop(); }
+}
+
+function buyChicken(level) {
+    const d = LEVEL_DATA[level];
+    if (game.gold < d.cost) { addFloatingText(W/2, H/2, '金币不足！', '#FF6B6B', 1000); return; }
+    game.gold -= d.cost;
+    const c = createChicken(level);
+    game.chickens.push(c);
+    addFloatingText(c.x, c.y-20, '+'+d.name+'!', '#90EE90', 1200);
+    addParticles(c.x+20, c.y+10, '#FFD700', 8);
+}
+
+function upgradeCoop() {
+    const cost = game.coopCapacity * 30;
+    if (game.gold < cost) { addFloatingText(W/2, H/2, '金币不足！', '#FF6B6B', 1000); return; }
+    game.gold -= cost;
+    game.coopCapacity += 2;
+    addFloatingText(W/2, H/2, '鸡舍扩建！容量→'+game.coopCapacity, '#90EE90', 1500);
+}
+
+function handleMergeSelect(chicken) {
+    if (chicken.level >= MAX_LEVEL) { addFloatingText(chicken.x, chicken.y-20, '已满级！', '#FF6B6B', 1000); return; }
+    if (chicken.selected) {
+        chicken.selected = false;
+        game.selectedForMerge = game.selectedForMerge.filter(id => id !== chicken.id);
+        return;
+    }
+    if (game.selectedForMerge.length > 0) {
+        const first = game.chickens.find(c => c.id === game.selectedForMerge[0]);
+        if (first && first.level !== chicken.level) { addFloatingText(chicken.x, chicken.y-20, '等级不同！', '#FF6B6B', 800); return; }
+    }
+    chicken.selected = true;
+    game.selectedForMerge.push(chicken.id);
+    if (game.selectedForMerge.length >= MERGE_COUNT) { performMerge(); }
+}
+
+function performMerge() {
+    const ids = game.selectedForMerge;
+    const mc = game.chickens.filter(c => ids.includes(c.id));
+    if (mc.length < MERGE_COUNT) return;
+    const level = mc[0].level;
+    const newLevel = Math.min(MAX_LEVEL, level+1);
+    const avgX = mc.reduce((s,c) => s+c.x, 0) / MERGE_COUNT;
+    const avgY = mc.reduce((s,c) => s+c.y, 0) / MERGE_COUNT;
+    game.chickens = game.chickens.filter(c => !ids.includes(c.id));
+    const nc = createChicken(newLevel, avgX, avgY);
+    game.chickens.push(nc);
+    addParticles(avgX+20, avgY+10, '#FFD700', 15);
+    addParticles(avgX+20, avgY+10, LEVEL_DATA[newLevel].body, 10);
+    addFloatingText(avgX, avgY-30, '✨ '+LEVEL_DATA[newLevel].name+'！', '#FFD700', 2000);
+    game.selectedForMerge = [];
+    game.mergeMode = false;
+}
+
+// ======================== DAY/NIGHT ========================
+
+function updateDayNight(dt) {
+    game.dayTimer += dt;
+    const limit = game.isDay ? DAY_LENGTH : NIGHT_LENGTH;
+    if (game.dayTimer >= limit) {
+        game.dayTimer = 0;
+        game.isDay = !game.isDay;
+        if (game.isDay) {
+            game.dayCount++;
+            addFloatingText(W/2, 100, '☀️ 第'+game.dayCount+'天', '#FFD700', 2000);
+        } else {
+            addFloatingText(W/2, 100, '🌙 夜晚来临', '#B0C4DE', 2000);
+        }
+    }
+}
+
+// ======================== SAVE / LOAD ========================
+
+function saveGame() {
+    try {
+        localStorage.setItem('chickenFarm', JSON.stringify({
+            gold: game.gold, coopCapacity: game.coopCapacity, dayCount: game.dayCount,
+            chickens: game.chickens.map(c => ({ level:c.level, x:c.x, y:c.y, mood:c.mood })),
+        }));
+    } catch(e) {}
+}
+
+function loadGame() {
+    try {
+        const raw = localStorage.getItem('chickenFarm');
+        if (!raw) return;
+        const d = JSON.parse(raw);
+        game.gold = d.gold || 15;
+        game.coopCapacity = d.coopCapacity || 5;
+        game.dayCount = d.dayCount || 1;
+        if (d.chickens) { d.chickens.forEach(c => { const ch = createChicken(c.level,c.x,c.y); ch.mood=c.mood||80; game.chickens.push(ch); }); }
+    } catch(e) {}
+}
+
+// ======================== GAME LOOP ========================
+
+function update(dt) {
+    if (dt > 0.1) dt = 0.1;
+    updateDayNight(dt);
+    game.chickens.forEach(c => updateChicken(c, dt));
+    updateParticles(dt);
+    game.saveTimer += dt*1000;
+    if (game.saveTimer >= SAVE_INTERVAL) { game.saveTimer=0; saveGame(); }
+}
+
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+    drawBackground();
+    game.eggs.forEach(e => drawEggObj(e));
+    [...game.chickens].sort((a,b) => a.y-b.y).forEach(c => drawChickenObj(c));
+    drawParticles();
+    drawUI();
+    drawShop();
+    drawMergeInfo();
+}
+
+function gameLoop(timestamp) {
+    const dt = game.lastTime ? (timestamp-game.lastTime)/1000 : 0.016;
+    game.lastTime = timestamp;
+    update(dt);
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+// ======================== INIT ========================
+
+loadGame();
+if (game.chickens.length === 0) { game.chickens.push(createChicken(1)); }
+requestAnimationFrame(gameLoop);
+
+</script>
+</body>
+</html>
+
